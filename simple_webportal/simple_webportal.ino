@@ -1,0 +1,163 @@
+/**
+ * OnDemandWebPortal.ino
+ * example of running the webportal (always NON blocking)
+ */
+ 
+#include <WiFiManager.h>        // https://github.com/tzapu/WiFiManager
+#include <WiFi.h>
+#include <AsyncTCP.h>           // https://github.com/me-no-dev/AsyncTCP
+#include <ESPAsyncWebServer.h>  // https://github.com/me-no-dev/ESPAsyncWebServer
+
+// select which pin will trigger the configuration portal when set to LOW
+#define TRIGGER_PIN 32
+
+WiFiManager wifiManager;
+
+const char* PARAM_INPUT_1 = "output";
+const char* PARAM_INPUT_2 = "state";
+
+// Create AsyncWebServer object on port 80
+AsyncWebServer server(80);
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html>
+<head>
+  <title>ESP Web Server</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <style>
+    html {font-family: Arial; display: inline-block; text-align: center;}
+    h2 {font-size: 3.0rem;}
+    p {font-size: 3.0rem;}
+    body {max-width: 600px; margin:0px auto; padding-bottom: 25px;}
+    .switch {position: relative; display: inline-block; width: 120px; height: 68px} 
+    .switch input {display: none}
+    .slider {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; border-radius: 6px}
+    .slider:before {position: absolute; content: ""; height: 52px; width: 52px; left: 8px; bottom: 8px; background-color: #fff; -webkit-transition: .4s; transition: .4s; border-radius: 3px}
+    input:checked+.slider {background-color: #b30000}
+    input:checked+.slider:before {-webkit-transform: translateX(52px); -ms-transform: translateX(52px); transform: translateX(52px)}
+  </style>
+</head>
+<body>
+  <h2>ESP Web Server</h2>
+  %BUTTONPLACEHOLDER%
+<script>function toggleCheckbox(element) {
+  var xhr = new XMLHttpRequest();
+  if(element.checked){ xhr.open("GET", "/update?output="+element.id+"&state=1", true); }
+  else { xhr.open("GET", "/update?output="+element.id+"&state=0", true); }
+  xhr.send();
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+const char state_html[] PROGMEM = R"rawliteral(
+%PLACEHOLDER%
+)rawliteral";
+
+String processor(const String& var){
+  if(var == "BUTTONPLACEHOLDER"){
+    String buttons = "";
+    buttons += "<h4>Output - GPIO 2</h4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"2\" " + outputState(2) + "><span class=\"slider\"></span></label>";
+    return buttons;
+  }
+  return String();
+}
+
+String processorPrometheus(const String& var){
+  if(var == "PLACEHOLDER"){
+    String pinStateDecimal = "0";
+    if(digitalRead(2)) {
+      pinStateDecimal = "1";
+    }
+
+    String scrapingText = "# HELP io_state_pin2 io state of pin \n";
+    scrapingText += "# TYPE io_state_pin2 gauge\n";
+    scrapingText += "io_state_pin2 " + pinStateDecimal + " \n";
+    return scrapingText;
+  }
+  return String();
+}
+
+String outputState(int output){
+  if(digitalRead(output)){
+    return "checked";
+  }
+  else {
+    return "";
+  }
+}
+
+bool portalRunning = false;
+
+// -------------------------- MIGHTY SETUP METHOD -----------------------------
+void setup() {
+  
+  Serial.begin(115200);
+  pinMode(TRIGGER_PIN, INPUT);
+  pinMode(2, OUTPUT);
+
+  wifiManager.autoConnect("ESP32-AP");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+
+  Serial.println("WiFi connected.");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  // Route for root / web page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html, processor);
+  });
+
+  // Route for prometheus
+  server.on("/state", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/plain;version=0.0.4;charset=utf-8", state_html, processorPrometheus);
+  });
+
+  // Route for action triggered method
+  server.on("/update", HTTP_GET, [] (AsyncWebServerRequest *request) {
+    String inputMessage1;
+    String inputMessage2;
+    // GET input1 value on <ESP_IP>/update?output=<inputMessage1>&state=<inputMessage2>
+    if (request->hasParam(PARAM_INPUT_1) && request->hasParam(PARAM_INPUT_2)) {
+      inputMessage1 = request->getParam(PARAM_INPUT_1)->value();
+      inputMessage2 = request->getParam(PARAM_INPUT_2)->value();
+      digitalWrite(inputMessage1.toInt(), inputMessage2.toInt());
+    }
+    else {
+      inputMessage1 = "No message sent";
+      inputMessage2 = "No message sent";
+    }
+    Serial.print("GPIO: ");
+    Serial.print(inputMessage1);
+    Serial.print(" - Set to: ");
+    Serial.println(inputMessage2);
+    request->send(200, "text/plain", "OK");
+  });
+
+  // Start server
+  server.begin();
+}
+
+void loop() {
+  checkButtonWifiConfig();
+  delay(1000);
+}
+
+void checkButtonWifiConfig(){
+  if(digitalRead(TRIGGER_PIN) == HIGH) {
+    delay(50);
+    if(digitalRead(TRIGGER_PIN) == HIGH) {
+      if(!portalRunning){
+        Serial.println("Button Pressed, Starting Portal, 60s timeout");
+        wifiManager.setConfigPortalTimeout(60);
+        wifiManager.startConfigPortal("ESP32-AP");
+        portalRunning = true;
+      }
+    }
+  }
+}
